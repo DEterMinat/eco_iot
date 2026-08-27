@@ -24,7 +24,7 @@ ProtectHome=true
 
 # ── Environment ────────────────────────────────────────────────────────────────
 Environment=PYTHONUNBUFFERED=1
-Environment=ECO_UPSTREAM_URL=http://192.168.1.100:8000
+Environment=ECO_UPSTREAM_URL=http://192.168.10.241:8000
 # Environment=ECO_IOT_MASTER_KEY=ek_your_master_key_here
 
 # ── Logging ────────────────────────────────────────────────────────────────────

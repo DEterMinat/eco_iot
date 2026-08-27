@@ -160,6 +160,7 @@ def create_app(args) -> FastAPI:
     camera: Optional[CameraManager] = None
     ai: Optional[AIEngine] = None
     mem_guard: Optional[MemoryGuardDaemon] = None
+    started_at = time.monotonic()
 
     # ── Startup ────────────────────────────────────────────────────────────────
     @app.on_event("startup")
@@ -308,9 +309,14 @@ def create_app(args) -> FastAPI:
                 "system_ram_available_mb": round(sys_mem.get("available_mb", 0), 1),
                 "system_ram_used_pct": sys_mem.get("used_pct", 0),
                 "ai_backend": ai.backend_name if ai else "offline",
+                "model_hash": ai.model_sha256 if ai else "",
+                "model_version": "demo-2026-08-28",
                 "camera_open": camera.is_open if camera else False,
                 "frames_captured": camera.frame_count if camera else 0,
-                "uptime_sec": round(time.process_time(), 1),
+                "actual_fps": round((camera.frame_count / max(time.monotonic() - started_at, 1e-3)) if camera else 0.0, 2),
+                "inference_p50_ms": ai.latency_stats["p50_ms"] if ai else 0.0,
+                "inference_p95_ms": ai.latency_stats["p95_ms"] if ai else 0.0,
+                "uptime_sec": round(time.monotonic() - started_at, 1),
                 "pid": os.getpid(),
             }
         except Exception as e:

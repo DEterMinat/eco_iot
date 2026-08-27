@@ -13,6 +13,8 @@ import logging
 import time
 import os
 import threading
+import hashlib
+from collections import deque
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -154,6 +156,8 @@ class AIEngine:
         self._conf_threshold = float(getattr(self.cfg, "confidence_threshold", 0.35))
         self._nms_threshold = 0.45
         self._labels = EWASTE_119_NAMES
+        self._model_sha256 = ""
+        self._latencies_ms = deque(maxlen=200)
 
         # Asynchronous Detection Cache for 30 FPS streaming
         self._cached_detections: List[Dict[str, Any]] = []
@@ -194,6 +198,11 @@ class AIEngine:
                     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
                     self._net = net
                     self._backend = "yolov8_onnx"
+                    try:
+                        with open(path, "rb") as model_file:
+                            self._model_sha256 = hashlib.sha256(model_file.read()).hexdigest()
+                    except OSError:
+                        self._model_sha256 = ""
                     logger.info(f"AI Engine loaded YOLOv8 ONNX: {path} (119 Classes)")
                     return
                 except Exception as e:
@@ -215,16 +224,21 @@ class AIEngine:
 
         if self._backend == "yolov8_onnx" and self._net is not None:
             return self._detect_yolov8_vectorized(frame, w, h)
-        else:
-            return self._detect_unknown_saliency(frame, w, h)
+        return []
 
     def _detect_yolov8_vectorized(self, frame, img_w: int, img_h: int) -> List[Dict[str, Any]]:
         """Vectorized YOLOv8 output tensor decoder (<2ms post-processing)."""
         try:
             # 1. Fast Blob creation
-            blob = cv2.dnn.blobFromImage(
-                frame, 1.0 / 255.0, self._input_size, swapRB=True, crop=False
-            )
+            # Ultralytics-compatible letterbox (preserves object geometry).
+            in_w, in_h = self._input_size
+            scale = min(in_w / img_w, in_h / img_h)
+            resized_w, resized_h = max(1, round(img_w * scale)), max(1, round(img_h * scale))
+            resized = cv2.resize(frame, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
+            pad_x, pad_y = (in_w - resized_w) // 2, (in_h - resized_h) // 2
+            canvas = np.full((in_h, in_w, 3), 114, dtype=np.uint8)
+            canvas[pad_y:pad_y + resized_h, pad_x:pad_x + resized_w] = resized
+            blob = cv2.dnn.blobFromImage(canvas, 1.0 / 255.0, self._input_size, swapRB=True, crop=False)
             self._net.setInput(blob)
             preds = self._net.forward()  # (1, 123, 2100)
 
@@ -243,18 +257,17 @@ class AIEngine:
                 filtered_cids = class_ids_arr[mask]
                 filtered_boxes_raw = output[mask, :4]
 
-                x_factor = img_w / float(self._input_size[0])
-                y_factor = img_h / float(self._input_size[1])
-
-                cx = filtered_boxes_raw[:, 0]
-                cy = filtered_boxes_raw[:, 1]
+                cx = (filtered_boxes_raw[:, 0] - pad_x) / scale
+                cy = (filtered_boxes_raw[:, 1] - pad_y) / scale
                 bw = filtered_boxes_raw[:, 2]
                 bh = filtered_boxes_raw[:, 3]
+                bw = bw / scale
+                bh = bh / scale
 
-                lefts = np.clip((cx - 0.5 * bw) * x_factor, 0, img_w - 1).astype(int)
-                tops = np.clip((cy - 0.5 * bh) * y_factor, 0, img_h - 1).astype(int)
-                widths = (bw * x_factor).astype(int)
-                heights = (bh * y_factor).astype(int)
+                lefts = np.clip(cx - 0.5 * bw, 0, img_w - 1).astype(int)
+                tops = np.clip(cy - 0.5 * bh, 0, img_h - 1).astype(int)
+                widths = np.clip(bw, 1, img_w).astype(int)
+                heights = np.clip(bh, 1, img_h).astype(int)
 
                 boxes = []
                 confidences = []
@@ -293,8 +306,8 @@ class AIEngine:
         except Exception as e:
             logger.error(f"YOLOv8 decode error: {e}")
 
-        # Check for unclassified foreground objects -> Mark as Unknown
-        return self._detect_unknown_saliency(frame, img_w, img_h)
+        # A detector miss is unknown; never infer a class from pixels/shape.
+        return []
 
     def _detect_unknown_saliency(self, frame, w: int, h: int) -> List[Dict[str, Any]]:
         """Detect held foreground object and mark as 'Unknown' if not matching classes."""
@@ -461,24 +474,38 @@ class AIEngine:
 
         if detections:
             primary = detections[0]
+            raw_label = primary.get("label", "unknown")
             label = primary["waste_type"]
-            conf = primary["confidence"]
+            conf = max(0.0, min(1.0, float(primary["confidence"])))
             co2 = primary["co2_offset_kg"]
-            disposal = primary["disposal_action"]
+            disposal = primary["disposal_action"] if label != "unknown" else None
+            class_id = self._labels.index(raw_label) if raw_label in self._labels else None
         else:
             label, conf = "unknown", 0.0
             co2 = 0.0
-            disposal = "CHECK_MANUAL"
+            disposal = None
+            raw_label = "unknown"
+            class_id = None
 
         latency = (time.time() - t0) * 1000
 
+        self._latencies_ms.append(latency)
         return {
+            "status": "detected" if label != "unknown" else "unknown",
+            "class": label,
+            "item_class": raw_label,
+            "item_label": raw_label,
+            "class_id": class_id,
+            "box": detections[0].get("box") if detections else None,
+            "detections": detections,
             "waste_type": label,
             "confidence": round(conf, 4),
+            "image_hash": hashlib.sha256(jpeg_bytes).hexdigest()[:16],
             "latency_ms": round(latency, 1),
             "backend": self._backend,
             "co2_offset_kg": co2,
             "disposal_action": disposal,
+            "model": {"backend": self._backend, "version": "demo-2026-08-28", "sha256": self._model_sha256},
             "detected_objects": detections,
             "category_info": CATEGORY_CONFIG.get(label, CATEGORY_CONFIG["unknown"]),
         }
@@ -496,3 +523,14 @@ class AIEngine:
     @property
     def backend_name(self) -> str:
         return self._backend
+
+    @property
+    def model_sha256(self) -> str:
+        return self._model_sha256
+
+    @property
+    def latency_stats(self) -> Dict[str, float]:
+        values = sorted(self._latencies_ms)
+        if not values:
+            return {"p50_ms": 0.0, "p95_ms": 0.0}
+        return {"p50_ms": round(values[len(values)//2], 1), "p95_ms": round(values[min(len(values)-1, int(len(values)*.95))], 1)}
