@@ -69,10 +69,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("eco_iot")
 
+import asyncio
+
 # ── FastAPI imports ────────────────────────────────────────────────────────────
 try:
     from fastapi import FastAPI, Request, HTTPException, Response
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
     import uvicorn
 except ImportError:
     logger.error("FastAPI/Uvicorn not installed. Run: pip install fastapi uvicorn")
@@ -369,6 +371,7 @@ def create_app(args) -> FastAPI:
 
     @app.get("/frame")
     async def live_frame():
+        """Single static JPEG snapshot."""
         if not camera or not camera.is_open:
             raise HTTPException(status_code=503, detail="Camera not available")
 
@@ -381,6 +384,233 @@ def create_app(args) -> FastAPI:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/stream")
+    @app.get("/video_feed")
+    async def video_stream(request: Request):
+        """Continuous real-time MJPEG video stream (multipart/x-mixed-replace)."""
+        if not camera or not camera.is_open:
+            raise HTTPException(status_code=503, detail="Camera not available")
+
+        async def _mjpeg_generator():
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    jpeg = camera.grab_frame_jpeg()
+                    if jpeg:
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n"
+                            b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
+                            + jpeg + b"\r\n"
+                        )
+                    await asyncio.sleep(0.04)  # ~25 FPS
+            except asyncio.CancelledError:
+                pass
+
+        return StreamingResponse(
+            _mjpeg_generator(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+
+    @app.get("/view", response_class=HTMLResponse)
+    @app.get("/live", response_class=HTMLResponse)
+    async def live_view_page(request: Request):
+        """Interactive real-time live camera & AI dashboard."""
+        api_key = request.query_params.get("api_key", "")
+        key_param = f"?api_key={api_key}" if api_key else ""
+
+        html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECO-Gradian IoT - Live Stream</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            background: #0B111A;
+            color: #E2E8F0;
+            font-family: 'Outfit', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            max-width: 800px;
+            margin-bottom: 16px;
+        }}
+        .logo {{ font-size: 20px; font-weight: 700; color: #10B981; display: flex; align-items: center; gap: 8px; }}
+        .badge {{
+            background: rgba(16, 185, 129, 0.15);
+            color: #10B981;
+            border: 1px solid #10B981;
+            padding: 4px 12px;
+            border-radius: 9999px;
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        .badge .dot {{
+            width: 8px; height: 8px; background: #10B981; border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }}
+        @keyframes pulse {{
+            0% {{ transform: scale(0.9); opacity: 0.7; }}
+            50% {{ transform: scale(1.3); opacity: 1; }}
+            100% {{ transform: scale(0.9); opacity: 0.7; }}
+        }}
+        .stream-card {{
+            position: relative;
+            background: #111827;
+            border: 1px solid #1F2937;
+            border-radius: 16px;
+            overflow: hidden;
+            width: 100%;
+            max-width: 800px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+        }}
+        .video-box {{
+            width: 100%;
+            aspect-ratio: 4 / 3;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .video-box img {{
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }}
+        .overlay-bar {{
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            right: 12px;
+            display: flex;
+            justify-content: space-between;
+            pointer-events: none;
+        }}
+        .stats-tag {{
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(8px);
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }}
+        .controls {{
+            width: 100%;
+            max-width: 800px;
+            margin-top: 16px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+        }}
+        .card {{
+            background: #111827;
+            border: 1px solid #1F2937;
+            padding: 14px 18px;
+            border-radius: 12px;
+        }}
+        .card-label {{ font-size: 12px; color: #94A3B8; text-transform: uppercase; margin-bottom: 4px; }}
+        .card-val {{ font-size: 18px; font-weight: 700; color: #F8FAFC; }}
+        .btn {{
+            background: #10B981;
+            color: #042F2E;
+            font-weight: 700;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 10px;
+            cursor: pointer;
+            width: 100%;
+            transition: all 0.2s;
+            text-align: center;
+        }}
+        .btn:hover {{ background: #059669; color: #fff; }}
+        #ai-result {{
+            margin-top: 12px;
+            font-size: 14px;
+            color: #A7F3D0;
+            font-weight: 600;
+            min-height: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">🌿 ECO-Gradian IoT Edge</div>
+        <div class="badge"><span class="dot"></span> LIVE 25 FPS</div>
+    </div>
+
+    <div class="stream-card">
+        <div class="video-box">
+            <img src="/stream{key_param}" alt="Live Camera Stream">
+        </div>
+        <div class="overlay-bar">
+            <div class="stats-tag">📷 USB WebCam (V4L2)</div>
+            <div class="stats-tag" id="ram-tag">💾 RAM: Checking...</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="card">
+            <div class="card-label">Hardware Device</div>
+            <div class="card-val">Orange Pi Zero 3</div>
+        </div>
+        <div class="card">
+            <div class="card-label">AI Inference Engine</div>
+            <div class="card-val" style="color: #38BDF8;">{ai.backend_name.upper() if ai else "OFFLINE"}</div>
+        </div>
+        <div class="card" style="display: flex; flex-direction: column; justify-content: center;">
+            <button class="btn" onclick="triggerInference()">⚡ ทดสอบ AI ตรวจจับขยะ</button>
+            <div id="ai-result"></div>
+        </div>
+    </div>
+
+    <script>
+        async function updateStats() {{
+            try {{
+                const res = await fetch('/health');
+                const data = await res.json();
+                document.getElementById('ram-tag').innerText = '💾 RAM: ' + data.process_ram_mb + ' MB / ' + data.ram_limit_mb + ' MB';
+            }} catch(e) {{}}
+        }}
+        setInterval(updateStats, 3000);
+        updateStats();
+
+        async function triggerInference() {{
+            const resBox = document.getElementById('ai-result');
+            resBox.innerText = '⏳ กำลังประมวลผล...';
+            try {{
+                const res = await fetch('/capture{key_param}');
+                const data = await res.json();
+                resBox.innerText = '🎯 ผล: ' + data.waste_type.toUpperCase() + ' (' + (data.confidence * 100).toFixed(1) + '%) | ' + data.latency_ms + 'ms';
+            }} catch(e) {{
+                resBox.innerText = '❌ เกิดข้อผิดพลาด: ' + e;
+            }}
+        }}
+    </script>
+</body>
+</html>"""
+        return HTMLResponse(content=html)
 
     @app.get("/keys")
     async def get_keys():
