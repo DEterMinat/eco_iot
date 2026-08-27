@@ -39,7 +39,7 @@ class EdgeConfig:
 
     # ── AI Model ───────────────────────────────────────────────────────────────
     model_path: str = str(MODELS_DIR / "waste_detector.onnx")
-    confidence_threshold: float = 0.30
+    confidence_threshold: float = float(os.environ.get("ECO_IOT_CONFIDENCE", "0.35"))
     enable_heuristic_fallback: bool = False   # False = only run 119-class YOLO model
     enable_contour_fallback: bool = False     # False = disable heuristic plastic/glass/paper guessing
     input_size: tuple = (320, 320)            # YOLOv8 input size

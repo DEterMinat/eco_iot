@@ -151,7 +151,7 @@ class AIEngine:
         self._backend: str = "heuristic"
         self._net = None
         self._input_size = (320, 320)
-        self._conf_threshold = 0.20  # Sensitive detection threshold for fast recognition
+        self._conf_threshold = float(getattr(self.cfg, "confidence_threshold", 0.35))
         self._nms_threshold = 0.45
         self._labels = EWASTE_119_NAMES
 
@@ -162,6 +162,15 @@ class AIEngine:
         self._min_infer_interval = 0.08  # Run inference max ~12 times/sec (saves CPU for smooth streaming)
 
         self._load_model()
+
+    @property
+    def confidence_threshold(self) -> float:
+        return self._conf_threshold
+
+    def set_confidence(self, val: float):
+        """Update confidence threshold dynamically (e.g. 0.10 to 0.95)."""
+        self._conf_threshold = max(0.05, min(0.99, float(val)))
+        logger.info(f"AI Engine confidence threshold updated to: {self._conf_threshold:.2f}")
 
     def _load_model(self):
         """Load waste_detector.onnx via OpenCV DNN or fallback."""
@@ -434,7 +443,7 @@ class AIEngine:
 
         # 6. Top Status HUD Bar
         cv2.rectangle(annotated, (0, 0), (w, 28), (15, 23, 42), -1)
-        hud_text = f"ECO-Gradian AI | YOLOv8 (119 Classes) | Detected: {len(detections)}"
+        hud_text = f"ECO-Gradian AI | YOLOv8 (119 Classes) | Conf: {int(self._conf_threshold*100)}% | Items: {len(detections)}"
         cv2.putText(annotated, hud_text, (10, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (16, 185, 129), 1, cv2.LINE_AA)
 
         return annotated

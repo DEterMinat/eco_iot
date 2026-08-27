@@ -667,6 +667,14 @@ def create_app(args) -> FastAPI:
         <div class="card">
             <div>
                 <div class="card-label">Real-time Waste Detector</div>
+                <div style="margin: 8px 0 12px 0;">
+                    <label style="font-size: 13px; color: #94A3B8; display: flex; justify-content: space-between;">
+                        <span>🎚️ ปรับค่าความมั่นใจ (Confidence Threshold):</span>
+                        <b id="conf-val" style="color: #10B981;">{int(ai.confidence_threshold * 100) if ai else 35}%</b>
+                    </label>
+                    <input type="range" id="conf-slider" min="5" max="90" value="{int(ai.confidence_threshold * 100) if ai else 35}" 
+                           style="width: 100%; margin-top: 6px; accent-color: #10B981;" oninput="updateConf(this.value)" onchange="applyConf(this.value)">
+                </div>
                 <button class="btn-action" onclick="triggerInference()">⚡ ตรวจจับและวิเคราะห์ขยะ</button>
             </div>
             <div class="result-box" id="ai-result">
@@ -680,6 +688,21 @@ def create_app(args) -> FastAPI:
         const apiKeyParam = "{key_param}";
         const streamImg = document.getElementById('stream-img');
         const toggleBtn = document.getElementById('toggle-box-btn');
+
+        function updateConf(val) {{
+            document.getElementById('conf-val').innerText = val + '%';
+        }}
+
+        async function applyConf(val) {{
+            const confFloat = parseFloat(val) / 100.0;
+            try {{
+                await fetch('/config/confidence{first_key_param}', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{confidence: confFloat}})
+                }});
+            }} catch(e) {{}}
+        }}
 
         function toggleAnnotation() {{
             isAnnotated = !isAnnotated;
@@ -712,7 +735,7 @@ def create_app(args) -> FastAPI:
                 const data = await res.json();
                 const waste = data.waste_type || 'general';
                 const pillClass = 'pill-' + waste;
-                const co2 = data.co2_offset_kg || 0.1;
+                const co2 = data.co2_offset_kg || 0.0;
                 const conf = ((data.confidence || 0.8) * 100).toFixed(1);
                 
                 let detectedText = '';
@@ -734,6 +757,22 @@ def create_app(args) -> FastAPI:
 </body>
 </html>"""
         return HTMLResponse(content=html)
+
+    @app.post("/config/confidence")
+    async def set_confidence_endpoint(request: Request):
+        try:
+            body = await request.json()
+            conf = float(body.get("confidence", 0.35))
+            if ai:
+                ai.set_confidence(conf)
+            return {"status": "updated", "confidence_threshold": conf}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/config/confidence")
+    async def get_confidence_endpoint():
+        conf = ai.confidence_threshold if ai else 0.35
+        return {"confidence_threshold": conf}
 
     @app.get("/keys")
     async def get_keys():
