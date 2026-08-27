@@ -15,3 +15,7 @@ Current artifact hashes:
 
 The 6-class TFLite artifacts are not part of the demo path. `model_quantized.tflite`
 is known-invalid on the target interpreter and must not be selected.
+
+Runtime defaults for the CPU demo are `ECO_IOT_INFER_FPS=8` and
+`ECO_IOT_OPENCV_THREADS=2`: camera capture/streaming stays responsive while the
+worker consumes the newest frame only. Override only after measuring on target.

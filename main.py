@@ -231,6 +231,11 @@ def create_app(args) -> FastAPI:
                 camera.close()
             except Exception:
                 pass
+        if ai:
+            try:
+                ai.close()
+            except Exception:
+                pass
         if mem_guard:
             try:
                 mem_guard.stop()
@@ -316,6 +321,7 @@ def create_app(args) -> FastAPI:
                 "actual_fps": round((camera.frame_count / max(time.monotonic() - started_at, 1e-3)) if camera else 0.0, 2),
                 "inference_p50_ms": ai.latency_stats["p50_ms"] if ai else 0.0,
                 "inference_p95_ms": ai.latency_stats["p95_ms"] if ai else 0.0,
+                "inference_fps_limit": ai.inference_fps_limit if ai else 0.0,
                 "uptime_sec": round(time.monotonic() - started_at, 1),
                 "pid": os.getpid(),
             }

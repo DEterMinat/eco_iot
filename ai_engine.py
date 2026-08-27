@@ -161,11 +161,46 @@ class AIEngine:
 
         # Asynchronous Detection Cache for 30 FPS streaming
         self._cached_detections: List[Dict[str, Any]] = []
-        self._last_infer_time: float = 0.0
         self._infer_lock = threading.Lock()
-        self._min_infer_interval = 0.08  # Run inference max ~12 times/sec (saves CPU for smooth streaming)
+        self._cache_lock = threading.Lock()
+        self._queue_condition = threading.Condition()
+        self._pending_frame = None  # latest-frame queue, capacity 1
+        self._stop_worker = False
+        self._infer_interval = 1.0 / max(1.0, float(os.environ.get("ECO_IOT_INFER_FPS", "8")))
+        self._worker = threading.Thread(target=self._inference_worker, name="edge-inference", daemon=True)
 
         self._load_model()
+        self._worker.start()
+
+    def _inference_worker(self):
+        """Consume only the newest frame so camera streaming never waits for inference."""
+        next_inference = 0.0
+        while True:
+            with self._queue_condition:
+                self._queue_condition.wait_for(
+                    lambda: self._stop_worker
+                    or (self._pending_frame is not None and time.monotonic() >= next_inference)
+                )
+                if self._stop_worker:
+                    return
+                frame = self._pending_frame
+                self._pending_frame = None
+            started = time.perf_counter()
+            try:
+                detections = self.detect_objects(frame)
+                with self._cache_lock:
+                    self._cached_detections = detections
+                self._latencies_ms.append((time.perf_counter() - started) * 1000.0)
+                next_inference = time.monotonic() + self._infer_interval
+            except Exception as exc:
+                logger.warning("background inference failed: %s", exc)
+
+    def close(self):
+        with self._queue_condition:
+            self._stop_worker = True
+            self._queue_condition.notify_all()
+        if self._worker.is_alive():
+            self._worker.join(timeout=1.0)
 
     @property
     def confidence_threshold(self) -> float:
@@ -194,6 +229,7 @@ class AIEngine:
                 try:
                     net = cv2.dnn.readNetFromONNX(path)
                     # Optimize for Orange Pi CPU
+                    cv2.setNumThreads(max(1, int(os.environ.get("ECO_IOT_OPENCV_THREADS", "2"))))
                     net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
                     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
                     self._net = net
@@ -223,7 +259,10 @@ class AIEngine:
         h, w = frame.shape[:2]
 
         if self._backend == "yolov8_onnx" and self._net is not None:
-            return self._detect_yolov8_vectorized(frame, w, h)
+            # OpenCV Net is stateful; serialize forward passes while keeping
+            # them off the HTTP streaming coroutine.
+            with self._infer_lock:
+                return self._detect_yolov8_vectorized(frame, w, h)
         return []
 
     def _detect_yolov8_vectorized(self, frame, img_w: int, img_h: int) -> List[Dict[str, Any]]:
@@ -356,19 +395,15 @@ class AIEngine:
         if frame is None or not HAS_CV2:
             return frame
 
-        now = time.time()
-        # Throttled async inference trigger
-        if now - self._last_infer_time >= self._min_infer_interval:
-            if self._infer_lock.acquire(blocking=False):
-                try:
-                    # Run inference on frame copy
-                    self._cached_detections = self.detect_objects(frame)
-                    self._last_infer_time = now
-                finally:
-                    self._infer_lock.release()
+        # Never run DNN inference on the HTTP streaming coroutine.
+        with self._queue_condition:
+            self._pending_frame = frame.copy()
+            self._queue_condition.notify()
 
         # Render cached bounding boxes
-        return self.annotate_frame(frame, detections=self._cached_detections)
+        with self._cache_lock:
+            cached = list(self._cached_detections)
+        return self.annotate_frame(frame, detections=cached)
 
     def annotate_frame(self, frame, detections: Optional[List[Dict]] = None):
         """Draw modern bounding boxes and category pills on frame."""
@@ -456,7 +491,8 @@ class AIEngine:
 
         # 6. Top Status HUD Bar
         cv2.rectangle(annotated, (0, 0), (w, 28), (15, 23, 42), -1)
-        hud_text = f"ECO-Gradian AI | YOLOv8 (119 Classes) | Conf: {int(self._conf_threshold*100)}% | Items: {len(detections)}"
+        hud_state = f"Items: {len(detections)}" if detections else "UNKNOWN - place demo item"
+        hud_text = f"ECO-Gradian AI | YOLOv8 (119 Classes) | Conf: {int(self._conf_threshold*100)}% | {hud_state}"
         cv2.putText(annotated, hud_text, (10, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (16, 185, 129), 1, cv2.LINE_AA)
 
         return annotated
@@ -534,3 +570,7 @@ class AIEngine:
         if not values:
             return {"p50_ms": 0.0, "p95_ms": 0.0}
         return {"p50_ms": round(values[len(values)//2], 1), "p95_ms": round(values[min(len(values)-1, int(len(values)*.95))], 1)}
+
+    @property
+    def inference_fps_limit(self) -> float:
+        return round(1.0 / self._infer_interval, 2)
