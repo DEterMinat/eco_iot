@@ -122,6 +122,18 @@ class CameraManager:
         # Fallback: direct synchronous grab
         return self._read_one_frame()
 
+    def grab_frame_bgr(self):
+        """Return raw OpenCV BGR numpy array frame (if available)."""
+        if not HAS_CV2 or not self._cap:
+            return None
+        with self._lock:
+            ret, frame = self._cap.read()
+            if ret and frame is not None:
+                if frame.shape[1] != self.width or frame.shape[0] != self.height:
+                    frame = cv2.resize(frame, (self.width, self.height))
+                return frame
+        return None
+
     def grab_frame_base64(self) -> Optional[str]:
         """Return the latest frame as a base64-encoded JPEG string."""
         jpeg = self.grab_frame_jpeg()

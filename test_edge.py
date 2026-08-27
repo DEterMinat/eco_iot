@@ -99,7 +99,7 @@ def test_ai_engine():
     from ai_engine import AIEngine
 
     engine = AIEngine()
-    assert engine.backend_name in ("tflite", "onnx", "heuristic")
+    assert engine.backend_name in ("tflite", "onnx", "heuristic", "contour_ai")
     print(f"  [OK] AIEngine loaded (backend: {engine.backend_name})")
 
     # Predict with synthetic JPEG bytes

@@ -388,16 +388,32 @@ def create_app(args) -> FastAPI:
     @app.get("/stream")
     @app.get("/video_feed")
     async def video_stream(request: Request):
-        """Continuous real-time MJPEG video stream (multipart/x-mixed-replace)."""
+        """Continuous real-time MJPEG video stream with optional AI bounding box overlay."""
         if not camera or not camera.is_open:
             raise HTTPException(status_code=503, detail="Camera not available")
 
+        # Query param ?annotate=1 (default true)
+        annotate_flag = request.query_params.get("annotate", "1").lower() in ("1", "true", "yes")
+
         async def _mjpeg_generator():
             try:
+                import cv2
                 while True:
                     if await request.is_disconnected():
                         break
-                    jpeg = camera.grab_frame_jpeg()
+
+                    if annotate_flag and ai:
+                        # Grab BGR frame and draw real-time bounding boxes
+                        bgr = camera.grab_frame_bgr()
+                        if bgr is not None:
+                            annotated = ai.annotate_frame(bgr)
+                            ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                            jpeg = buf.tobytes() if ok else None
+                        else:
+                            jpeg = camera.grab_frame_jpeg()
+                    else:
+                        jpeg = camera.grab_frame_jpeg()
+
                     if jpeg:
                         yield (
                             b"--frame\r\n"
@@ -408,6 +424,8 @@ def create_app(args) -> FastAPI:
                     await asyncio.sleep(0.04)  # ~25 FPS
             except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
 
         return StreamingResponse(
             _mjpeg_generator(),
@@ -422,43 +440,53 @@ def create_app(args) -> FastAPI:
     @app.get("/view", response_class=HTMLResponse)
     @app.get("/live", response_class=HTMLResponse)
     async def live_view_page(request: Request):
-        """Interactive real-time live camera & AI dashboard."""
+        """Interactive real-time live camera & AI object detection dashboard."""
         api_key = request.query_params.get("api_key", "")
-        key_param = f"?api_key={api_key}" if api_key else ""
+        key_param = f"&api_key={api_key}" if api_key else ""
+        first_key_param = f"?api_key={api_key}" if api_key else ""
 
         html = f"""<!DOCTYPE html>
 <html lang="th">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ECO-Gradian IoT - Live Stream</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <title>ECO-Gradian IoT - AI Object Detection & Live Stream</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            background: #0B111A;
-            color: #E2E8F0;
-            font-family: 'Outfit', sans-serif;
+            background: #090D16;
+            color: #F1F5F9;
+            font-family: 'Outfit', 'Noto Sans Thai', sans-serif;
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
-            padding: 20px;
+            padding: 16px;
         }}
         .header {{
             display: flex;
             align-items: center;
             justify-content: space-between;
             width: 100%;
-            max-width: 800px;
-            margin-bottom: 16px;
+            max-width: 860px;
+            margin-bottom: 14px;
         }}
-        .logo {{ font-size: 20px; font-weight: 700; color: #10B981; display: flex; align-items: center; gap: 8px; }}
-        .badge {{
-            background: rgba(16, 185, 129, 0.15);
+        .logo {{
+            font-size: 20px;
+            font-weight: 700;
             color: #10B981;
-            border: 1px solid #10B981;
-            padding: 4px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            letter-spacing: -0.5px;
+        }}
+        .header-actions {{ display: flex; align-items: center; gap: 8px; }}
+        .badge {{
+            background: rgba(16, 185, 129, 0.12);
+            color: #10B981;
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            padding: 5px 12px;
             border-radius: 9999px;
             font-size: 13px;
             font-weight: 600;
@@ -477,21 +505,22 @@ def create_app(args) -> FastAPI:
         }}
         .stream-card {{
             position: relative;
-            background: #111827;
-            border: 1px solid #1F2937;
-            border-radius: 16px;
+            background: #0F172A;
+            border: 1px solid #1E293B;
+            border-radius: 18px;
             overflow: hidden;
             width: 100%;
-            max-width: 800px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+            max-width: 860px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
         }}
         .video-box {{
             width: 100%;
             aspect-ratio: 4 / 3;
-            background: #000;
+            background: #020617;
             display: flex;
             align-items: center;
             justify-content: center;
+            position: relative;
         }}
         .video-box img {{
             width: 100%;
@@ -499,93 +528,172 @@ def create_app(args) -> FastAPI:
             object-fit: cover;
             display: block;
         }}
-        .overlay-bar {{
-            position: absolute;
-            top: 12px;
-            left: 12px;
-            right: 12px;
+        .stream-bar {{
+            padding: 10px 16px;
+            background: #0B1220;
+            border-top: 1px solid #1E293B;
             display: flex;
             justify-content: space-between;
-            pointer-events: none;
-        }}
-        .stats-tag {{
-            background: rgba(15, 23, 42, 0.75);
-            backdrop-filter: blur(8px);
-            padding: 6px 12px;
-            border-radius: 8px;
+            align-items: center;
             font-size: 13px;
-            border: 1px solid rgba(255,255,255,0.1);
         }}
-        .controls {{
+        .tag-group {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+        .tag {{
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #94A3B8;
+        }}
+        .tag.active {{ color: #38BDF8; border-color: rgba(56, 189, 248, 0.3); }}
+        .btn-toggle {{
+            background: #1E293B;
+            color: #F8FAFC;
+            border: 1px solid #334155;
+            padding: 6px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }}
+        .btn-toggle:hover {{ background: #334155; }}
+        .btn-toggle.on {{ background: #059669; color: #fff; border-color: #10B981; }}
+        
+        .dashboard-grid {{
             width: 100%;
-            max-width: 800px;
-            margin-top: 16px;
+            max-width: 860px;
+            margin-top: 14px;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
             gap: 12px;
         }}
         .card {{
-            background: #111827;
-            border: 1px solid #1F2937;
-            padding: 14px 18px;
-            border-radius: 12px;
+            background: #0F172A;
+            border: 1px solid #1E293B;
+            padding: 16px 18px;
+            border-radius: 14px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
         }}
-        .card-label {{ font-size: 12px; color: #94A3B8; text-transform: uppercase; margin-bottom: 4px; }}
-        .card-val {{ font-size: 18px; font-weight: 700; color: #F8FAFC; }}
-        .btn {{
+        .card-label {{ font-size: 12px; color: #94A3B8; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.5px; }}
+        .card-val {{ font-size: 19px; font-weight: 700; color: #F8FAFC; }}
+        .btn-action {{
             background: #10B981;
-            color: #042F2E;
+            color: #022C22;
             font-weight: 700;
             border: none;
-            padding: 12px 20px;
+            padding: 13px 20px;
             border-radius: 10px;
             cursor: pointer;
             width: 100%;
             transition: all 0.2s;
-            text-align: center;
-        }}
-        .btn:hover {{ background: #059669; color: #fff; }}
-        #ai-result {{
-            margin-top: 12px;
             font-size: 14px;
-            color: #A7F3D0;
-            font-weight: 600;
-            min-height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
         }}
+        .btn-action:hover {{ background: #059669; color: #fff; transform: translateY(-1px); }}
+        .btn-action:active {{ transform: translateY(0); }}
+        
+        .result-box {{
+            margin-top: 10px;
+            padding: 10px 14px;
+            border-radius: 10px;
+            background: #020617;
+            border: 1px solid #1E293B;
+            font-size: 13px;
+            color: #E2E8F0;
+            line-height: 1.5;
+        }}
+        .category-pill {{
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 12px;
+            margin-right: 4px;
+        }}
+        .pill-plastic {{ background: rgba(16, 185, 129, 0.2); color: #34D399; border: 1px solid #10B981; }}
+        .pill-paper {{ background: rgba(245, 158, 11, 0.2); color: #FBBF24; border: 1px solid #F59E0B; }}
+        .pill-metal {{ background: rgba(59, 130, 246, 0.2); color: #60A5FA; border: 1px solid #3B82F6; }}
+        .pill-glass {{ background: rgba(6, 182, 212, 0.2); color: #22D3EE; border: 1px solid #06B6D4; }}
+        .pill-organic {{ background: rgba(132, 204, 22, 0.2); color: #A3E635; border: 1px solid #84CC16; }}
+        .pill-e_waste {{ background: rgba(139, 92, 246, 0.2); color: #A78BFA; border: 1px solid #8B5CF6; }}
+        .pill-general {{ background: rgba(148, 163, 184, 0.2); color: #CBD5E1; border: 1px solid #94A3B8; }}
     </style>
 </head>
 <body>
     <div class="header">
         <div class="logo">🌿 ECO-Gradian IoT Edge</div>
-        <div class="badge"><span class="dot"></span> LIVE 25 FPS</div>
+        <div class="header-actions">
+            <button id="toggle-box-btn" class="btn-toggle on" onclick="toggleAnnotation()">🎯 กล่อง AI: เปิด</button>
+            <div class="badge"><span class="dot"></span> LIVE 25 FPS</div>
+        </div>
     </div>
 
     <div class="stream-card">
         <div class="video-box">
-            <img src="/stream{key_param}" alt="Live Camera Stream">
+            <img id="stream-img" src="/stream?annotate=1{key_param}" alt="Live AI Stream">
         </div>
-        <div class="overlay-bar">
-            <div class="stats-tag">📷 USB WebCam (V4L2)</div>
-            <div class="stats-tag" id="ram-tag">💾 RAM: Checking...</div>
+        <div class="stream-bar">
+            <div class="tag-group">
+                <span class="tag active">📷 GENERAL WEBCAM</span>
+                <span class="tag" id="ram-tag">💾 RAM: Checking...</span>
+            </div>
+            <div class="tag-group">
+                <span class="tag" id="fps-tag">⚡ 25 FPS</span>
+                <span class="tag" id="status-tag">🟢 ONLINE</span>
+            </div>
         </div>
     </div>
 
-    <div class="controls">
+    <div class="dashboard-grid">
         <div class="card">
-            <div class="card-label">Hardware Device</div>
-            <div class="card-val">Orange Pi Zero 3</div>
+            <div>
+                <div class="card-label">Hardware Device</div>
+                <div class="card-val">Orange Pi Zero 3</div>
+                <div style="font-size: 12px; color: #64748B; margin-top: 4px;">Linux Ubuntu (aarch64) - ≤1GB RAM Target</div>
+            </div>
+            <div style="margin-top: 12px;">
+                <div class="card-label">AI Inference Engine</div>
+                <div class="card-val" style="color: #38BDF8;">{ai.backend_name.upper() if ai else "OFFLINE"}</div>
+            </div>
         </div>
+
         <div class="card">
-            <div class="card-label">AI Inference Engine</div>
-            <div class="card-val" style="color: #38BDF8;">{ai.backend_name.upper() if ai else "OFFLINE"}</div>
-        </div>
-        <div class="card" style="display: flex; flex-direction: column; justify-content: center;">
-            <button class="btn" onclick="triggerInference()">⚡ ทดสอบ AI ตรวจจับขยะ</button>
-            <div id="ai-result"></div>
+            <div>
+                <div class="card-label">Real-time Waste Detector</div>
+                <button class="btn-action" onclick="triggerInference()">⚡ ตรวจจับและวิเคราะห์ขยะ</button>
+            </div>
+            <div class="result-box" id="ai-result">
+                💡 วางสิ่งของหน้ากล้องเพื่อดู <b>กรอบสีเหลี่ยม Bounding Box</b> และชนิดขยะแบบสดๆ
+            </div>
         </div>
     </div>
 
     <script>
+        let isAnnotated = true;
+        const apiKeyParam = "{key_param}";
+        const streamImg = document.getElementById('stream-img');
+        const toggleBtn = document.getElementById('toggle-box-btn');
+
+        function toggleAnnotation() {{
+            isAnnotated = !isAnnotated;
+            const annotateVal = isAnnotated ? '1' : '0';
+            streamImg.src = '/stream?annotate=' + annotateVal + apiKeyParam;
+            if (isAnnotated) {{
+                toggleBtn.innerText = '🎯 กล่อง AI: เปิด';
+                toggleBtn.className = 'btn-toggle on';
+            }} else {{
+                toggleBtn.innerText = '🎯 กล่อง AI: ปิด';
+                toggleBtn.className = 'btn-toggle';
+            }}
+        }}
+
         async function updateStats() {{
             try {{
                 const res = await fetch('/health');
@@ -598,13 +706,28 @@ def create_app(args) -> FastAPI:
 
         async function triggerInference() {{
             const resBox = document.getElementById('ai-result');
-            resBox.innerText = '⏳ กำลังประมวลผล...';
+            resBox.innerHTML = '⏳ กำลังวิเคราะห์ภาพถ่าย...';
             try {{
-                const res = await fetch('/capture{key_param}');
+                const res = await fetch('/capture{first_key_param}');
                 const data = await res.json();
-                resBox.innerText = '🎯 ผล: ' + data.waste_type.toUpperCase() + ' (' + (data.confidence * 100).toFixed(1) + '%) | ' + data.latency_ms + 'ms';
+                const waste = data.waste_type || 'general';
+                const pillClass = 'pill-' + waste;
+                const co2 = data.co2_offset_kg || 0.1;
+                const conf = ((data.confidence || 0.8) * 100).toFixed(1);
+                
+                let detectedText = '';
+                if (data.detected_objects && data.detected_objects.length > 0) {{
+                    detectedText = '<br><span style="color:#94A3B8; font-size:12px;">ตรวจพบ ' + data.detected_objects.length + ' วัตถุในกรอบ</span>';
+                }}
+
+                resBox.innerHTML = '<div>' +
+                    '<span class="category-pill ' + pillClass + '">' + waste.toUpperCase() + '</span> ' +
+                    '<b>' + (data.category_info ? data.category_info.th_name : waste) + '</b> (' + conf + '%)' +
+                    detectedText +
+                    '<div style="margin-top: 6px; font-size: 12px; color: #34D399;">🌱 ลด CO2 ได้: -' + co2 + ' kg | ' + data.latency_ms + 'ms</div>' +
+                    '</div>';
             }} catch(e) {{
-                resBox.innerText = '❌ เกิดข้อผิดพลาด: ' + e;
+                resBox.innerHTML = '❌ ผิดพลาด: ' + e;
             }}
         }}
     </script>
