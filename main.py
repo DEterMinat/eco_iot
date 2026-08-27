@@ -474,14 +474,14 @@ def create_app(args) -> FastAPI:
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
-            padding: 16px;
+            padding: 20px;
         }}
         .header {{
             display: flex;
             align-items: center;
             justify-content: space-between;
             width: 100%;
-            max-width: 860px;
+            max-width: 1040px;
             margin-bottom: 14px;
         }}
         .logo {{
@@ -522,7 +522,7 @@ def create_app(args) -> FastAPI:
             border-radius: 18px;
             overflow: hidden;
             width: 100%;
-            max-width: 860px;
+            max-width: 1040px;
             box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
         }}
         .video-box {{
@@ -540,6 +540,7 @@ def create_app(args) -> FastAPI:
             object-fit: cover;
             display: block;
         }}
+        .video-box::after {{ content: 'LIVE • AI OVERLAY'; position: absolute; top: 14px; right: 14px; padding: 5px 9px; border-radius: 999px; background: rgba(2,6,23,.75); color: #6EE7B7; border: 1px solid rgba(110,231,183,.35); font-size: 10px; font-weight: 700; letter-spacing: .7px; pointer-events: none; }}
         .stream-bar {{
             padding: 10px 16px;
             background: #0B1220;
@@ -575,7 +576,7 @@ def create_app(args) -> FastAPI:
         
         .dashboard-grid {{
             width: 100%;
-            max-width: 860px;
+            max-width: 1040px;
             margin-top: 14px;
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -592,6 +593,16 @@ def create_app(args) -> FastAPI:
         }}
         .card-label {{ font-size: 12px; color: #94A3B8; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.5px; }}
         .card-val {{ font-size: 19px; font-weight: 700; color: #F8FAFC; }}
+        .metric-row {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }}
+        .metric {{ background: #111C2E; border: 1px solid #23324A; border-radius: 10px; padding: 9px; }}
+        .metric b {{ display: block; color: #F8FAFC; font-size: 15px; margin-top: 3px; }}
+        .confidence-meter {{ height: 7px; background: #1E293B; border-radius: 99px; overflow: hidden; margin-top: 9px; }}
+        .confidence-meter span {{ display: block; width: 35%; height: 100%; background: linear-gradient(90deg,#F59E0B,#10B981); border-radius: inherit; }}
+        .result-main {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
+        .result-title {{ font-size: 22px; font-weight: 700; color: #F8FAFC; }}
+        .result-subtitle {{ color: #94A3B8; font-size: 12px; margin-top: 3px; }}
+        .result-confidence {{ font-size: 24px; font-weight: 700; color: #6EE7B7; }}
+        @media (max-width: 720px) {{ body {{ padding: 10px; }} .header {{ align-items: flex-start; gap: 10px; }} .logo {{ font-size: 16px; }} .header-actions {{ flex-wrap: wrap; justify-content: flex-end; }} .stream-bar {{ padding: 8px 10px; }} .dashboard-grid {{ grid-template-columns: 1fr; }} .metric-row {{ grid-template-columns: 1fr 1fr; }} }}
         .btn-action {{
             background: #10B981;
             color: #022C22;
@@ -684,8 +695,8 @@ def create_app(args) -> FastAPI:
                         <span>🎚️ ปรับค่าความมั่นใจ (Confidence Threshold):</span>
                         <b id="conf-val" style="color: #10B981;">{int(ai.confidence_threshold * 100) if ai else 35}%</b>
                     </label>
-                    <input type="range" id="conf-slider" min="5" max="90" value="{int(ai.confidence_threshold * 100) if ai else 35}" 
-                           style="width: 100%; margin-top: 6px; accent-color: #10B981;" oninput="updateConf(this.value)" onchange="applyConf(this.value)">
+                    <div class="confidence-meter" aria-label="Frozen confidence threshold"><span style="width: {int(ai.confidence_threshold * 100) if ai else 35}%"></span></div>
+                    <div style="font-size: 11px; color: #64748B; margin-top: 7px;">ค่า threshold ถูก freeze สำหรับ demo เพื่อให้ผลคงที่</div>
                 </div>
                 <button class="btn-action" onclick="triggerInference()">⚡ ตรวจจับและวิเคราะห์ขยะ</button>
             </div>
@@ -745,19 +756,25 @@ def create_app(args) -> FastAPI:
             try {{
                 const res = await fetch('/capture{first_key_param}');
                 const data = await res.json();
-                const waste = data.waste_type || 'general';
+                if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+                const waste = data.class || 'unknown';
                 const pillClass = 'pill-' + waste;
                 const co2 = data.co2_offset_kg || 0.0;
-                const conf = ((data.confidence || 0.8) * 100).toFixed(1);
+                const conf = (Math.max(0, Math.min(1, Number(data.confidence || 0))) * 100).toFixed(1);
+                const item = data.item_label || data.item_class || 'unknown';
+                const thaiAliases = {{'Laptop':'แล็ปท็อป','Keyboard':'คีย์บอร์ด','mouse':'เมาส์','phone':'โทรศัพท์','Battery Charger':'ที่ชาร์จแบตเตอรี่','Cable Charger':'สายชาร์จ','adapter':'อะแดปเตอร์','laptopadapter':'อะแดปเตอร์แล็ปท็อป'}};
+                const displayItem = thaiAliases[item] || item;
                 
                 let detectedText = '';
-                if (data.detected_objects && data.detected_objects.length > 0) {{
-                    detectedText = '<br><span style="color:#94A3B8; font-size:12px;">ตรวจพบ ' + data.detected_objects.length + ' วัตถุในกรอบ</span>';
+                if (data.detections && data.detections.length > 0) {{
+                    detectedText = '<br><span style="color:#94A3B8; font-size:12px;">ตรวจพบ ' + data.detections.length + ' วัตถุในกรอบ</span>';
                 }}
 
-                resBox.innerHTML = '<div>' +
+                resBox.innerHTML = '<div class="result-main">' +
                     '<span class="category-pill ' + pillClass + '">' + waste.toUpperCase() + '</span> ' +
-                    '<b>' + (data.category_info ? data.category_info.th_name : waste) + '</b> (' + conf + '%)' +
+                    '<div class="result-title">' + displayItem + '</div>' +
+                    '<div class="result-subtitle">' + (data.model?.backend || 'edge') + ' • ' + (data.latency_ms || 0) + ' ms</div>' +
+                    '<div class="result-confidence">' + conf + '%</div>' +
                     detectedText +
                     '<div style="margin-top: 6px; font-size: 12px; color: #34D399;">🌱 ลด CO2 ได้: -' + co2 + ' kg | ' + data.latency_ms + 'ms</div>' +
                     '</div>';

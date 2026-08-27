@@ -11,7 +11,8 @@
 Current artifact hashes:
 
 - `waste_detector.pt`: `96f2fe450bba2cfca6c50f9c7a519ee24b4c543b19dbe265b37013e5ef18eae5`
-- `waste_detector.onnx`: `eaed98673cdd9f42c9d54225e7a0d85c9107d14908fbac7e0328b9ee17db918c`
+- `waste_detector.onnx` (320 export): `7051a9f3d46e9b50dd03cdd8fed62cbfd75a3aa412e47e7c062c6e5d91cfc7f7`
+- `waste_detector_640.onnx` (accuracy profile): `9fa169131a48502ae80331e6fa1048d2c01aff7030572645704c14730f491e94`
 
 The 6-class TFLite artifacts are not part of the demo path. `model_quantized.tflite`
 is known-invalid on the target interpreter and must not be selected.
