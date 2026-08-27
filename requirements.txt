@@ -1,0 +1,25 @@
+# ECO-Gradian IoT Edge Device — Minimal Dependencies
+# Designed for ≤1GB RAM SBCs (Orange Pi, Raspberry Pi, etc.)
+
+# ── Core Server ────────────────────────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+
+# ── AI Inference (choose ONE per platform) ─────────────────────────────────────
+# For Orange Pi 5 / RPi (ARM64):
+#   pip install tflite-runtime
+# For x86 dev machine:
+#   pip install tensorflow-cpu
+# Uncomment the one you need:
+# tflite-runtime==2.14.0
+# onnxruntime==1.17.0
+
+# ── Camera ─────────────────────────────────────────────────────────────────────
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+
+# ── Optional: Async HTTP for upstream sync ─────────────────────────────────────
+httpx==0.27.0
+
+# ── Optional: System metrics ──────────────────────────────────────────────────
+# psutil==6.0.0  # Uncomment for detailed RAM/CPU monitoring

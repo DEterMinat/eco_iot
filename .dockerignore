@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+data/api_keys.json
+logs/*.log
+logs/*.log.*
+models/*.tflite
+models/*.onnx
+*.egg-info/
+dist/
+build/
+.pytest_cache/

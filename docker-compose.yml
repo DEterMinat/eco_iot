@@ -1,0 +1,92 @@
+# =============================================================================
+# ECO-Gradian IoT Edge — Docker Compose
+# =============================================================================
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f eco_iot
+#   docker compose exec eco_iot python main.py --generate-key "Camera Lab"
+# =============================================================================
+
+services:
+  eco_iot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eco_iot
+    restart: always
+
+    # ── Hard RAM Limit: 1 GB ──────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+    mem_limit: 1024m
+    memswap_limit: 1024m       # No swap = truly enforce 1 GB
+    oom_kill_disable: false     # Let OOM killer terminate if breach
+
+    # ── USB Camera Access ─────────────────────────────────────────────────────
+    devices:
+      - /dev/video0:/dev/video0
+    group_add:
+      - video
+
+    # ── Ports ─────────────────────────────────────────────────────────────────
+    ports:
+      - "8080:8080"
+
+    # ── Persistent Volumes ────────────────────────────────────────────────────
+    volumes:
+      - eco_iot_data:/app/data
+      - eco_iot_logs:/app/logs
+      - eco_iot_models:/app/models
+
+    # ── Environment ───────────────────────────────────────────────────────────
+    environment:
+      - ECO_IOT_PORT=8080
+      - ECO_IOT_CAMERA=0
+      - ECO_UPSTREAM_URL=http://host.docker.internal:8000
+      # Uncomment to set a fixed master key:
+      # - ECO_IOT_MASTER_KEY=ek_master_your_secret_here
+      # Memory tuning
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - MALLOC_TRIM_THRESHOLD_=65536
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - PYTHONMALLOC=malloc
+
+    # ── Entrypoint ────────────────────────────────────────────────────────────
+    command: ["--port", "8080", "--camera", "0"]
+
+    # ── Health Check ──────────────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # ── Logging (prevent log explosion on IoT) ────────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # ── Security ──────────────────────────────────────────────────────────────
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M
+
+volumes:
+  eco_iot_data:
+    driver: local
+  eco_iot_logs:
+    driver: local
+  eco_iot_models:
+    driver: local

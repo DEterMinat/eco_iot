@@ -1,0 +1,36 @@
+[Unit]
+Description=ECO-Gradian IoT Edge AI Server
+Documentation=https://github.com/eco-gradian/eco_iot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/eco_iot
+ExecStart=/opt/eco_iot/.venv/bin/python /opt/eco_iot/main.py --camera 0 --port 8080
+Restart=always
+RestartSec=5
+
+# ── RAM Hard Limit (1 GB) ─────────────────────────────────────────────────────
+MemoryMax=1024M
+MemoryHigh=900M
+
+# ── Security Hardening ─────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/eco_iot/logs /opt/eco_iot/data
+ProtectHome=true
+
+# ── Environment ────────────────────────────────────────────────────────────────
+Environment=PYTHONUNBUFFERED=1
+Environment=ECO_UPSTREAM_URL=http://192.168.1.100:8000
+# Environment=ECO_IOT_MASTER_KEY=ek_your_master_key_here
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eco_iot
+
+[Install]
+WantedBy=multi-user.target
