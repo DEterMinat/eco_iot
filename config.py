@@ -38,11 +38,13 @@ class EdgeConfig:
     jpeg_quality: int = 80         # Lower = smaller frames = less RAM
 
     # ── AI Model ───────────────────────────────────────────────────────────────
-    model_path: str = str(MODELS_DIR / "waste_classifier.tflite")
-    confidence_threshold: float = 0.65
-    input_size: tuple = (224, 224)  # MobileNet-v2 default
+    model_path: str = str(MODELS_DIR / "waste_detector.onnx")
+    confidence_threshold: float = 0.30
+    enable_heuristic_fallback: bool = False   # False = only run 119-class YOLO model
+    enable_contour_fallback: bool = False     # False = disable heuristic plastic/glass/paper guessing
+    input_size: tuple = (320, 320)            # YOLOv8 input size
     class_labels: tuple = (
-        "plastic", "paper", "metal", "glass", "organic", "e_waste", "general"
+        "e_waste", "plastic", "paper", "metal", "glass", "organic", "general"
     )
 
     # ── RAM Guard ──────────────────────────────────────────────────────────────

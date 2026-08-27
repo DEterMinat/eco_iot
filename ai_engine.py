@@ -270,11 +270,15 @@ class AIEngine:
         except Exception as e:
             logger.error(f"YOLOv8 decode error: {e}")
 
-        # Fallback if no YOLO detection triggered
-        return self._detect_contour_fallback(frame, img_w, img_h)
+        # Check if fallback guessing is enabled (default: False)
+        if getattr(self.cfg, "enable_contour_fallback", False):
+            return self._detect_contour_fallback(frame, img_w, img_h)
+        return []
 
     def _detect_contour_fallback(self, frame, w: int, h: int) -> List[Dict[str, Any]]:
-        """Saliency & Contour detector fallback."""
+        """Saliency & Contour detector fallback (Disabled when enable_contour_fallback=False)."""
+        if not getattr(self.cfg, "enable_contour_fallback", False):
+            return []
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (7, 7), 0)
         edged = cv2.Canny(blurred, 40, 120)
@@ -458,9 +462,14 @@ class AIEngine:
             co2 = primary["co2_offset_kg"]
             disposal = primary["disposal_action"]
         else:
-            label, conf = "general", 0.55
-            co2 = 0.1
-            disposal = "OPEN_FLAP_GENERAL"
+            if getattr(self.cfg, "enable_heuristic_fallback", False):
+                label, conf = "general", 0.55
+                co2 = 0.1
+                disposal = "OPEN_FLAP_GENERAL"
+            else:
+                label, conf = "none", 0.0
+                co2 = 0.0
+                disposal = "NONE"
 
         latency = (time.time() - t0) * 1000
 
