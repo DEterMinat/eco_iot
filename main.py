@@ -403,10 +403,10 @@ def create_app(args) -> FastAPI:
                         break
 
                     if annotate_flag and ai:
-                        # Grab BGR frame and draw real-time bounding boxes
+                        # Grab cached BGR frame and draw smooth bounding boxes
                         bgr = camera.grab_frame_bgr()
                         if bgr is not None:
-                            annotated = ai.annotate_frame(bgr)
+                            annotated = ai.annotate_frame_smooth(bgr)
                             ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
                             jpeg = buf.tobytes() if ok else None
                         else:

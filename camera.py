@@ -123,7 +123,9 @@ class CameraManager:
         return self._read_one_frame()
 
     def grab_frame_bgr(self):
-        """Return raw OpenCV BGR numpy array frame (if available)."""
+        """Return raw OpenCV BGR numpy array frame from cache without blocking."""
+        if hasattr(self, "_latest_bgr") and self._latest_bgr is not None:
+            return self._latest_bgr.copy()
         if not HAS_CV2 or not self._cap:
             return None
         with self._lock:
@@ -131,7 +133,8 @@ class CameraManager:
             if ret and frame is not None:
                 if frame.shape[1] != self.width or frame.shape[0] != self.height:
                     frame = cv2.resize(frame, (self.width, self.height))
-                return frame
+                self._latest_bgr = frame
+                return frame.copy()
         return None
 
     def grab_frame_base64(self) -> Optional[str]:
@@ -172,6 +175,7 @@ class CameraManager:
             if frame.shape[1] != self.width or frame.shape[0] != self.height:
                 frame = cv2.resize(frame, (self.width, self.height))
 
+            self._latest_bgr = frame
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
             if ok:
                 self._frame_count += 1
