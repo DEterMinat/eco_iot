@@ -165,6 +165,10 @@ class AIEngine:
         self._cache_lock = threading.Lock()
         self._queue_condition = threading.Condition()
         self._pending_frame = None  # latest-frame queue, capacity 1
+        self._pending_urgent = False
+        self._last_scene_signature = None
+        self._last_urgent_at = 0.0
+        self._urgent_cooldown = 0.25
         self._stop_worker = False
         self._infer_interval = 1.0 / max(1.0, float(os.environ.get("ECO_IOT_INFER_FPS", "8")))
         self._worker = threading.Thread(target=self._inference_worker, name="edge-inference", daemon=True)
@@ -179,12 +183,13 @@ class AIEngine:
             with self._queue_condition:
                 self._queue_condition.wait_for(
                     lambda: self._stop_worker
-                    or (self._pending_frame is not None and time.monotonic() >= next_inference)
+                    or (self._pending_frame is not None and (self._pending_urgent or time.monotonic() >= next_inference))
                 )
                 if self._stop_worker:
                     return
                 frame = self._pending_frame
                 self._pending_frame = None
+                self._pending_urgent = False
             started = time.perf_counter()
             try:
                 detections = self.detect_objects(frame)
@@ -396,8 +401,23 @@ class AIEngine:
             return frame
 
         # Never run DNN inference on the HTTP streaming coroutine.
+        urgent = False
+        if HAS_NUMPY and HAS_CV2:
+            # Motion gate is intentionally tiny (32x24 grayscale) and avoids
+            # waiting for the normal cadence when a new object enters view.
+            signature = cv2.resize(frame, (32, 24), interpolation=cv2.INTER_AREA)
+            signature = cv2.cvtColor(signature, cv2.COLOR_BGR2GRAY).astype(np.int16)
+            if self._last_scene_signature is not None:
+                motion = float(np.mean(np.abs(signature - self._last_scene_signature)))
+                now = time.monotonic()
+                urgent = motion >= 7.0 and (now - self._last_urgent_at) >= self._urgent_cooldown
+                if urgent:
+                    self._last_urgent_at = now
+            self._last_scene_signature = signature
+
         with self._queue_condition:
             self._pending_frame = frame.copy()
+            self._pending_urgent = self._pending_urgent or urgent
             self._queue_condition.notify()
 
         # Render cached bounding boxes

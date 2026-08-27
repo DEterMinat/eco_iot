@@ -654,7 +654,7 @@ def create_app(args) -> FastAPI:
         <div class="logo">🌿 ECO-Gradian IoT Edge</div>
         <div class="header-actions">
             <button id="toggle-box-btn" class="btn-toggle on" onclick="toggleAnnotation()">🎯 กล่อง AI: เปิด</button>
-            <div class="badge"><span class="dot"></span> LIVE 25 FPS</div>
+            <div class="badge"><span class="dot"></span> LIVE {cfg.camera_fps} FPS</div>
         </div>
     </div>
 
