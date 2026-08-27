@@ -42,7 +42,7 @@ services:
     volumes:
       - eco_iot_data:/app/data
       - eco_iot_logs:/app/logs
-      - eco_iot_models:/app/models
+      - ./models:/app/models:ro
 
     # ── Environment ───────────────────────────────────────────────────────────
     environment:
