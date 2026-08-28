@@ -102,6 +102,8 @@ def handle_cli():
     parser = argparse.ArgumentParser(description="ECO-Gradian IoT Edge Server")
     parser.add_argument("--port", type=int, default=int(os.environ.get("ECO_IOT_PORT", "8080")))
     parser.add_argument("--camera", type=int, default=int(os.environ.get("ECO_IOT_CAMERA", "0")))
+    parser.add_argument("--camera-url", default=os.environ.get("ECO_IOT_CAMERA_URL", ""),
+                        help="Network camera URL (MJPEG/RTSP); overrides --camera")
     parser.add_argument("--generate-key", type=str, metavar="LABEL")
     parser.add_argument("--list-keys", action="store_true")
     parser.add_argument("--no-camera", action="store_true")
@@ -145,6 +147,7 @@ def create_app(args) -> FastAPI:
     cfg = get_config(
         port=args.port,
         camera_index=args.camera,
+        camera_url=args.camera_url or None,
         require_api_key=not args.no_auth,
     )
 
@@ -192,6 +195,7 @@ def create_app(args) -> FastAPI:
             try:
                 camera = CameraManager(
                     index=cfg.camera_index,
+                    source_url=cfg.camera_url,
                     width=cfg.camera_width,
                     height=cfg.camera_height,
                     fps=cfg.camera_fps,
@@ -318,6 +322,7 @@ def create_app(args) -> FastAPI:
                 "model_version": "demo-2026-08-28",
                 "camera_open": camera.is_open if camera else False,
                 "frames_captured": camera.frame_count if camera else 0,
+                "camera_frame_age_ms": camera.last_frame_age_ms if camera else None,
                 "actual_fps": round((camera.frame_count / max(time.monotonic() - started_at, 1e-3)) if camera else 0.0, 2),
                 "inference_p50_ms": ai.latency_stats["p50_ms"] if ai else 0.0,
                 "inference_p95_ms": ai.latency_stats["p95_ms"] if ai else 0.0,
@@ -414,16 +419,22 @@ def create_app(args) -> FastAPI:
                     if await request.is_disconnected():
                         break
 
-                    if annotate_flag and ai:
-                        # Grab cached BGR frame and draw smooth bounding boxes
-                        bgr = camera.grab_frame_bgr()
-                        if bgr is not None:
-                            annotated = ai.annotate_frame_smooth(bgr)
-                            ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                            jpeg = buf.tobytes() if ok else None
+                    try:
+                        if annotate_flag and ai:
+                            # Use the newest cached frame; never wait for DNN inference.
+                            bgr = camera.grab_frame_bgr()
+                            if bgr is not None:
+                                annotated = ai.annotate_frame_smooth(bgr)
+                                ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                                jpeg = buf.tobytes() if ok else None
+                            else:
+                                jpeg = camera.grab_frame_jpeg()
                         else:
                             jpeg = camera.grab_frame_jpeg()
-                    else:
+                    except Exception as frame_error:
+                        # One malformed/disconnected frame must not terminate the
+                        # long-lived MJPEG response and leave a frozen browser image.
+                        logger.warning("Stream frame skipped: %s", frame_error)
                         jpeg = camera.grab_frame_jpeg()
 
                     if jpeg:
@@ -446,6 +457,8 @@ def create_app(args) -> FastAPI:
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
                 "Expires": "0",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
             },
         )
 

@@ -12,7 +12,7 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger("eco_iot.camera")
 
@@ -30,6 +30,7 @@ class CameraManager:
     def __init__(
         self,
         index: int = 0,
+        source_url: Optional[str] = None,
         width: int = 640,
         height: int = 480,
         fps: int = 15,
@@ -37,6 +38,7 @@ class CameraManager:
         buffer_size: int = 3,
     ):
         self.index = index
+        self.source_url = source_url.strip() if source_url else None
         self.width = width
         self.height = height
         self.fps = fps
@@ -48,6 +50,8 @@ class CameraManager:
         self._thread: Optional[threading.Thread] = None
         self._frame_count = 0
         self._last_error: Optional[str] = None
+        self._latest_bgr = None
+        self._last_frame_at = 0.0
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -61,12 +65,14 @@ class CameraManager:
             if self._cap and self._cap.isOpened():
                 return True
 
-            # Prefer V4L2 backend on Linux (Orange Pi / RPi)
-            backends = [cv2.CAP_V4L2, cv2.CAP_ANY] if hasattr(cv2, "CAP_V4L2") else [cv2.CAP_ANY]
+            source: Union[int, str] = self.source_url or self.index
+            # V4L2 is for local devices; network URLs need the generic backend.
+            backends = ([cv2.CAP_ANY] if self.source_url else
+                        ([cv2.CAP_V4L2, cv2.CAP_ANY] if hasattr(cv2, "CAP_V4L2") else [cv2.CAP_ANY]))
 
             for backend in backends:
                 try:
-                    cap = cv2.VideoCapture(self.index, backend)
+                    cap = cv2.VideoCapture(source, backend)
                     if cap.isOpened():
                         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
@@ -84,7 +90,7 @@ class CameraManager:
                 except Exception as e:
                     logger.debug(f"Backend {backend} failed: {e}")
 
-            self._last_error = f"Cannot open camera index {self.index}"
+            self._last_error = f"Cannot open camera source {self.source_url or self.index}"
             logger.error(f"❌ {self._last_error}")
             return False
 
@@ -124,8 +130,9 @@ class CameraManager:
 
     def grab_frame_bgr(self):
         """Return raw OpenCV BGR numpy array frame from cache without blocking."""
-        if hasattr(self, "_latest_bgr") and self._latest_bgr is not None:
-            return self._latest_bgr.copy()
+        with self._lock:
+            if self._latest_bgr is not None:
+                return self._latest_bgr.copy()
         if not HAS_CV2 or not self._cap:
             return None
         with self._lock:
@@ -134,6 +141,7 @@ class CameraManager:
                 if frame.shape[1] != self.width or frame.shape[0] != self.height:
                     frame = cv2.resize(frame, (self.width, self.height))
                 self._latest_bgr = frame
+                self._last_frame_at = time.monotonic()
                 return frame.copy()
         return None
 
@@ -158,30 +166,45 @@ class CameraManager:
     def last_error(self) -> Optional[str]:
         return self._last_error
 
+    @property
+    def last_frame_age_ms(self) -> Optional[float]:
+        """Age of the newest successfully decoded frame."""
+        if self._last_frame_at <= 0:
+            return None
+        return round((time.monotonic() - self._last_frame_at) * 1000.0, 1)
+
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _read_one_frame(self) -> Optional[bytes]:
         """Single synchronous frame read (for on-demand capture)."""
         if not HAS_CV2 or not self._cap:
-            return self._synthetic_jpeg()
+            return None
 
         with self._lock:
             ret, frame = self._cap.read()
             if not ret or frame is None:
                 self._last_error = "Frame grab failed"
-                return self._synthetic_jpeg()
+                # Mark a dead network/device stream closed so the capture loop
+                # can reopen it with backoff instead of spinning on a stale
+                # VideoCapture handle.
+                try:
+                    self._cap.release()
+                finally:
+                    self._cap = None
+                return None
 
             # Resize if needed (should already be set via CAP_PROP)
             if frame.shape[1] != self.width or frame.shape[0] != self.height:
                 frame = cv2.resize(frame, (self.width, self.height))
 
             self._latest_bgr = frame
+            self._last_frame_at = time.monotonic()
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
             if ok:
                 self._frame_count += 1
                 return buf.tobytes()
 
-        return self._synthetic_jpeg()
+        return None
 
     def _capture_loop(self):
         """Background loop: grab frames into ring buffer."""

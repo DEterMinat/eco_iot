@@ -32,6 +32,7 @@ class EdgeConfig:
 
     # ── Camera (USB / CSI / RTSP) ──────────────────────────────────────────────
     camera_index: int = 0          # /dev/video0 by default
+    camera_url: Optional[str] = os.environ.get("ECO_IOT_CAMERA_URL") or None
     camera_width: int = 640
     camera_height: int = 480
     camera_fps: int = 15
