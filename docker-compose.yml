@@ -43,6 +43,12 @@ services:
       - eco_iot_data:/app/data
       - eco_iot_logs:/app/logs
       - ./models:/app/models:ro
+      # Keep code hotfixes deployable on an offline edge without rebuilding
+      # the base image; remove these mounts in the next connected image build.
+      - ./main.py:/app/main.py:ro
+      - ./camera.py:/app/camera.py:ro
+      - ./ai_engine.py:/app/ai_engine.py:ro
+      - ./config.py:/app/config.py:ro
 
     # ── Environment ───────────────────────────────────────────────────────────
     environment:

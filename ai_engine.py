@@ -336,7 +336,10 @@ class AIEngine:
 
                             detections.append({
                                 "box": [int(bx), int(by), int(bx + bw), int(by + bh)],
+                                "class_id": int(cid),
                                 "label": f"{raw_name}",
+                                "item_class": raw_name,
+                                "item_label": raw_name,
                                 "waste_type": waste_cat,
                                 "confidence": round(conf, 2),
                                 "co2_offset_kg": co2,
@@ -464,7 +467,7 @@ class AIEngine:
             cv2.line(annotated, (x1, y2), (x1 + corner_len, y2), bgr, thk)
             cv2.line(annotated, (x1, y2), (x1, y2 - corner_len), bgr, thk)
             cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), bgr, thk)
-            cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), bgr, thk)
+            cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), bgr, thk)
 
             # 4. Header Pill Badge
             tag_text = f"[{waste_type.upper()}] {label} ({int(conf * 100)}%)"
@@ -556,12 +559,12 @@ class AIEngine:
             "detections": detections,
             "waste_type": label,
             "confidence": round(conf, 4),
-            "image_hash": hashlib.sha256(jpeg_bytes).hexdigest()[:16],
+            "image_hash": self._perceptual_hash(img, jpeg_bytes),
             "latency_ms": round(latency, 1),
-            "backend": self._backend,
+            "backend": "opencv_onnx" if self._backend == "yolov8_onnx" else self._backend,
             "co2_offset_kg": co2,
             "disposal_action": disposal,
-            "model": {"backend": self._backend, "version": "demo-2026-08-28", "sha256": self._model_sha256},
+            "model": {"backend": "opencv_onnx" if self._backend == "yolov8_onnx" else self._backend, "version": "demo-2026-08-28", "sha256": self._model_sha256},
             "detected_objects": detections,
             "category_info": CATEGORY_CONFIG.get(label, CATEGORY_CONFIG["unknown"]),
         }
@@ -575,6 +578,27 @@ class AIEngine:
             return cv2.imdecode(arr, cv2.IMREAD_COLOR)
         except Exception:
             return None
+
+    @staticmethod
+    def _perceptual_hash(image, jpeg_bytes: bytes) -> str:
+        """Return a compact dHash for duplicate-risk checks.
+
+        The raw JPEG digest is intentionally not used as the product identity:
+        camera re-encodes of the same object should still be recognisable as a
+        duplicate by the verification service.
+        """
+        if image is not None and HAS_CV2 and HAS_NUMPY:
+            try:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                resized = cv2.resize(gray, (9, 8), interpolation=cv2.INTER_AREA)
+                bits = resized[:, 1:] > resized[:, :-1]
+                value = 0
+                for bit in bits.reshape(-1):
+                    value = (value << 1) | int(bool(bit))
+                return f"{value:016x}"
+            except Exception:
+                pass
+        return hashlib.sha256(jpeg_bytes).hexdigest()[:16]
 
     @property
     def backend_name(self) -> str:

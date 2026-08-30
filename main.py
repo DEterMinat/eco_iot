@@ -310,6 +310,8 @@ def create_app(args) -> FastAPI:
         try:
             rss = get_process_rss_mb()
             sys_mem = get_system_mem_mb()
+            frame_age = camera.last_frame_age_ms if camera else None
+            camera_online = bool(camera and camera.is_open and frame_age is not None and frame_age < 2000)
             return {
                 "status": "healthy" if rss < cfg.max_ram_mb else "degraded",
                 "process_ram_mb": round(rss, 1),
@@ -317,13 +319,20 @@ def create_app(args) -> FastAPI:
                 "system_ram_total_mb": round(sys_mem.get("total_mb", 0), 1),
                 "system_ram_available_mb": round(sys_mem.get("available_mb", 0), 1),
                 "system_ram_used_pct": sys_mem.get("used_pct", 0),
-                "ai_backend": ai.backend_name if ai else "offline",
+                # Keep health and prediction contracts consistent.  The
+                # internal loader name is implementation detail; operators
+                # should see the deployable backend name.
+                "ai_backend": (
+                    "opencv_onnx" if ai and ai.backend_name == "yolov8_onnx"
+                    else (ai.backend_name if ai else "offline")
+                ),
                 "model_hash": ai.model_sha256 if ai else "",
                 "model_version": "demo-2026-08-28",
-                "camera_open": camera.is_open if camera else False,
+                "camera_open": camera_online,
+                "camera_status": "online" if camera_online else "offline",
                 "frames_captured": camera.frame_count if camera else 0,
-                "camera_frame_age_ms": camera.last_frame_age_ms if camera else None,
-                "actual_fps": round((camera.frame_count / max(time.monotonic() - started_at, 1e-3)) if camera else 0.0, 2),
+                "camera_frame_age_ms": frame_age,
+                "actual_fps": camera.actual_fps if camera else 0.0,
                 "inference_p50_ms": ai.latency_stats["p50_ms"] if ai else 0.0,
                 "inference_p95_ms": ai.latency_stats["p95_ms"] if ai else 0.0,
                 "inference_fps_limit": ai.inference_fps_limit if ai else 0.0,
@@ -340,18 +349,36 @@ def create_app(args) -> FastAPI:
 
         try:
             content_type = request.headers.get("content-type", "")
+            max_image_bytes = 5 * 1024 * 1024
+            content_length = request.headers.get("content-length")
+            if content_length and int(content_length) > max_image_bytes:
+                raise HTTPException(status_code=413, detail="Image exceeds 5 MB limit")
 
-            if "image/jpeg" in content_type or "application/octet-stream" in content_type:
+            if content_type.startswith("image/") or "application/octet-stream" in content_type:
                 jpeg_bytes = await request.body()
             else:
                 body = await request.json()
                 b64 = body.get("image_base64", "")
                 if "," in b64:
                     b64 = b64.split(",", 1)[1]
-                jpeg_bytes = base64.b64decode(b64)
+                try:
+                    jpeg_bytes = base64.b64decode(b64, validate=True)
+                except (ValueError, TypeError):
+                    raise HTTPException(status_code=400, detail="Invalid base64 image")
+
+            if len(jpeg_bytes) > max_image_bytes:
+                raise HTTPException(status_code=413, detail="Image exceeds 5 MB limit")
 
             if not jpeg_bytes:
                 raise HTTPException(status_code=400, detail="Empty image")
+
+            valid_signature = (
+                jpeg_bytes.startswith(b"\xff\xd8")
+                or jpeg_bytes.startswith(b"\x89PNG")
+                or (jpeg_bytes.startswith(b"RIFF") and b"WEBP" in jpeg_bytes[8:16])
+            )
+            if not valid_signature:
+                raise HTTPException(status_code=400, detail="Unsupported image format")
 
             result = ai.predict(jpeg_bytes)
             result["timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -469,6 +496,8 @@ def create_app(args) -> FastAPI:
         api_key = request.query_params.get("api_key", "")
         key_param = f"&api_key={api_key}" if api_key else ""
         first_key_param = f"?api_key={api_key}" if api_key else ""
+        mac_camera_mode = request.query_params.get("camera", "").lower() == "mac"
+        stream_attribute = "" if mac_camera_mode else f'src="/stream?annotate=1{key_param}"'
 
         html = f"""<!DOCTYPE html>
 <html lang="th">
@@ -673,7 +702,7 @@ def create_app(args) -> FastAPI:
 
     <div class="stream-card">
         <div class="video-box">
-            <img id="stream-img" src="/stream?annotate=1{key_param}" alt="Live AI Stream">
+            <img id="stream-img" {stream_attribute} alt="Live AI Stream">
         </div>
         <div class="stream-bar">
             <div class="tag-group">
@@ -681,8 +710,8 @@ def create_app(args) -> FastAPI:
                 <span class="tag" id="ram-tag">💾 RAM: Checking...</span>
             </div>
             <div class="tag-group">
-                <span class="tag" id="fps-tag">⚡ 25 FPS</span>
-                <span class="tag" id="status-tag">🟢 ONLINE</span>
+                <span class="tag" id="fps-tag">⚡ FPS: —</span>
+                <span class="tag" id="status-tag">🟡 UNKNOWN</span>
             </div>
         </div>
     </div>
@@ -722,28 +751,125 @@ def create_app(args) -> FastAPI:
     <script>
         let isAnnotated = true;
         const apiKeyParam = "{key_param}";
+        const firstKeyParam = "{first_key_param}";
+        const useMacCamera = new URLSearchParams(window.location.search).get('camera') === 'mac';
         const streamImg = document.getElementById('stream-img');
         const toggleBtn = document.getElementById('toggle-box-btn');
+        let macVideo = null;
+        let macOverlay = null;
+        let macOverlayCtx = null;
+        let macCapture = null;
+        let macStream = null;
+        let macTimer = null;
+        let macInferenceBusy = false;
+        let macDetections = [];
 
-        function updateConf(val) {{
-            document.getElementById('conf-val').innerText = val + '%';
-        }}
-
-        async function applyConf(val) {{
-            const confFloat = parseFloat(val) / 100.0;
-            try {{
-                await fetch('/config/confidence{first_key_param}', {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({{confidence: confFloat}})
+        function setupMacCamera() {{
+            streamImg.style.display = 'none';
+            const box = document.querySelector('.video-box');
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+                document.getElementById('status-tag').innerText = '🔴 CAMERA API UNAVAILABLE';
+                document.getElementById('ai-result').innerText = 'Browser ไม่อนุญาตให้เข้าถึงกล้องบนหน้านี้';
+                return;
+            }}
+            macVideo = document.createElement('video');
+            macVideo.autoplay = true;
+            macVideo.playsInline = true;
+            macVideo.muted = true;
+            macVideo.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+            macOverlay = document.createElement('canvas');
+            macOverlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
+            box.appendChild(macVideo);
+            box.appendChild(macOverlay);
+            macVideo.addEventListener('loadedmetadata', () => {{
+                macCapture = document.createElement('canvas');
+                macCapture.width = macVideo.videoWidth || 640;
+                macCapture.height = macVideo.videoHeight || 480;
+                macOverlay.width = macCapture.width;
+                macOverlay.height = macCapture.height;
+                macOverlayCtx = macOverlay.getContext('2d');
+                requestAnimationFrame(renderMacOverlay);
+            }});
+            navigator.mediaDevices.getUserMedia({{video: {{width: {{ideal: 640}}, height: {{ideal: 480}}}}, audio: false}})
+                .then(stream => {{
+                    macStream = stream;
+                    macVideo.srcObject = stream;
+                    return macVideo.play();
+                }})
+                .then(() => {{
+                    document.getElementById('status-tag').innerText = '🟢 MAC CAMERA';
+                    if (macTimer) clearInterval(macTimer);
+                    macTimer = setInterval(() => macInferenceTick(false), 250);
+                }})
+                .catch(err => {{
+                    document.getElementById('status-tag').innerText = '🔴 CAMERA DENIED';
+                    document.getElementById('ai-result').innerText = 'เปิดกล้อง Mac ไม่สำเร็จ: ' + err.message;
                 }});
-            }} catch(e) {{}}
         }}
+
+        function renderMacOverlay() {{
+            if (macVideo && macOverlayCtx && macVideo.readyState >= 2) {{
+                macOverlayCtx.clearRect(0, 0, macOverlay.width, macOverlay.height);
+                if (isAnnotated) {{
+                    for (const det of macDetections) {{
+                        const b = det.box || [];
+                        if (b.length !== 4) continue;
+                        const x = Number(b[0]), y = Number(b[1]);
+                        const w = Number(b[2]) - x, h = Number(b[3]) - y;
+                        macOverlayCtx.strokeStyle = '#00F5A0';
+                        macOverlayCtx.lineWidth = 3;
+                        macOverlayCtx.strokeRect(x, y, w, h);
+                        macOverlayCtx.fillStyle = '#00F5A0';
+                        macOverlayCtx.font = 'bold 16px sans-serif';
+                        const label = (det.label || det.item_class || 'unknown') + ' ' + (Number(det.confidence || 0) * 100).toFixed(0) + '%';
+                        macOverlayCtx.fillText(label, Math.max(4, x), Math.max(18, y - 5));
+                    }}
+                }}
+            }}
+            if (macVideo) requestAnimationFrame(renderMacOverlay);
+        }}
+
+        async function macInferenceTick(manual) {{
+            if (!macVideo || !macCapture || macVideo.readyState < 2 || macInferenceBusy) return;
+            macInferenceBusy = true;
+            try {{
+                const ctx = macCapture.getContext('2d');
+                ctx.drawImage(macVideo, 0, 0, macCapture.width, macCapture.height);
+                const blob = await new Promise(resolve => macCapture.toBlob(resolve, 'image/jpeg', 0.78));
+                if (!blob) throw new Error('สร้าง JPEG จากกล้องไม่ได้');
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 2500);
+                let res;
+                try {{
+                    res = await fetch('/predict' + firstKeyParam, {{method: 'POST', headers: {{'Content-Type': 'image/jpeg'}}, body: blob, signal: controller.signal}});
+                }} finally {{
+                    clearTimeout(timeout);
+                }}
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+                macDetections = Array.isArray(data.detections) ? data.detections : [];
+                const item = data.item_label || data.item_class || data.class || 'unknown';
+                const conf = (Math.max(0, Math.min(1, Number(data.confidence || 0))) * 100).toFixed(1);
+                document.getElementById('ai-result').innerHTML = '<div class="result-main"><div class="result-title">' + item + '</div><div class="result-confidence">' + conf + '%</div><div class="result-subtitle">Mac camera → Orange Pi YOLO · ' + (data.latency_ms || 0) + ' ms · ' + macDetections.length + ' objects</div></div>';
+            }} catch (err) {{
+                if (manual) document.getElementById('ai-result').innerText = 'ตรวจจับไม่สำเร็จ: ' + err.message;
+            }} finally {{
+                macInferenceBusy = false;
+            }}
+        }}
+
+        if (useMacCamera) setupMacCamera();
+        window.addEventListener('beforeunload', () => {{
+            if (macTimer) clearInterval(macTimer);
+            if (macStream) macStream.getTracks().forEach(track => track.stop());
+        }});
 
         function toggleAnnotation() {{
             isAnnotated = !isAnnotated;
-            const annotateVal = isAnnotated ? '1' : '0';
-            streamImg.src = '/stream?annotate=' + annotateVal + apiKeyParam;
+            if (!useMacCamera) {{
+                const annotateVal = isAnnotated ? '1' : '0';
+                streamImg.src = '/stream?annotate=' + annotateVal + apiKeyParam;
+            }}
             if (isAnnotated) {{
                 toggleBtn.innerText = '🎯 กล่อง AI: เปิด';
                 toggleBtn.className = 'btn-toggle on';
@@ -758,13 +884,28 @@ def create_app(args) -> FastAPI:
                 const res = await fetch('/health');
                 const data = await res.json();
                 document.getElementById('ram-tag').innerText = '💾 RAM: ' + data.process_ram_mb + ' MB / ' + data.ram_limit_mb + ' MB';
-            }} catch(e) {{}}
+                const fps = Number(data.actual_fps);
+                document.getElementById('fps-tag').innerText = '⚡ FPS: ' + (Number.isFinite(fps) ? fps.toFixed(1) : '—');
+                if (!useMacCamera) {{
+                    const cameraOnline = data.camera_open === true;
+                    document.getElementById('status-tag').innerText = cameraOnline ? '🟢 CAMERA ONLINE' : '🔴 CAMERA OFFLINE';
+                }}
+            }} catch(e) {{
+                document.getElementById('ram-tag').innerText = '💾 RAM: unavailable';
+                document.getElementById('fps-tag').innerText = '⚡ FPS: —';
+                if (!useMacCamera) document.getElementById('status-tag').innerText = '🔴 EDGE OFFLINE';
+            }}
         }}
         setInterval(updateStats, 3000);
         updateStats();
 
         async function triggerInference() {{
             const resBox = document.getElementById('ai-result');
+            if (useMacCamera) {{
+                resBox.innerText = 'กำลังวิเคราะห์ภาพจากกล้อง Mac...';
+                await macInferenceTick(true);
+                return;
+            }}
             resBox.innerHTML = '⏳ กำลังวิเคราะห์ภาพถ่าย...';
             try {{
                 const res = await fetch('/capture{first_key_param}');
@@ -802,14 +943,10 @@ def create_app(args) -> FastAPI:
 
     @app.post("/config/confidence")
     async def set_confidence_endpoint(request: Request):
-        try:
-            body = await request.json()
-            conf = float(body.get("confidence", 0.35))
-            if ai:
-                ai.set_confidence(conf)
-            return {"status": "updated", "confidence_threshold": conf}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        # Threshold is calibrated once from the deployment golden set. A live
+        # slider would make the demo non-reproducible and could lower the bar
+        # far enough to turn false positives into apparent detections.
+        raise HTTPException(status_code=409, detail="CONFIDENCE_THRESHOLD_FROZEN")
 
     @app.get("/config/confidence")
     async def get_confidence_endpoint():

@@ -21,7 +21,7 @@ try:
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
-    logger.warning("OpenCV not installed — camera will run in simulation mode")
+    logger.warning("OpenCV not installed — camera is unavailable")
 
 
 class CameraManager:
@@ -49,6 +49,7 @@ class CameraManager:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._frame_count = 0
+        self._frame_times: deque = deque(maxlen=30)
         self._last_error: Optional[str] = None
         self._latest_bgr = None
         self._last_frame_at = 0.0
@@ -58,8 +59,9 @@ class CameraManager:
     def open(self) -> bool:
         """Open the camera device. Returns True on success."""
         if not HAS_CV2:
-            logger.info("📷 Camera (simulation mode — no OpenCV)")
-            return True
+            self._last_error = "OpenCV is not installed"
+            logger.error("❌ Camera unavailable: OpenCV is not installed")
+            return False
 
         with self._lock:
             if self._cap and self._cap.isOpened():
@@ -80,6 +82,7 @@ class CameraManager:
                         # Reduce internal buffer to save RAM
                         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                         self._cap = cap
+                        self._frame_times.clear()
                         self._last_error = None
                         logger.info(
                             f"✅ Camera opened: /dev/video{self.index} "
@@ -131,6 +134,8 @@ class CameraManager:
     def grab_frame_bgr(self):
         """Return raw OpenCV BGR numpy array frame from cache without blocking."""
         with self._lock:
+            if self._cap is None or not self._cap.isOpened():
+                return None
             if self._latest_bgr is not None:
                 return self._latest_bgr.copy()
         if not HAS_CV2 or not self._cap:
@@ -158,8 +163,6 @@ class CameraManager:
 
     @property
     def is_open(self) -> bool:
-        if not HAS_CV2:
-            return True  # simulation
         return self._cap is not None and self._cap.isOpened()
 
     @property
@@ -173,6 +176,14 @@ class CameraManager:
             return None
         return round((time.monotonic() - self._last_frame_at) * 1000.0, 1)
 
+    @property
+    def actual_fps(self) -> float:
+        """Rolling FPS from successfully encoded frames, not the target setting."""
+        if len(self._frame_times) < 2:
+            return 0.0
+        elapsed = self._frame_times[-1] - self._frame_times[0]
+        return round((len(self._frame_times) - 1) / elapsed, 2) if elapsed > 0 else 0.0
+
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _read_one_frame(self) -> Optional[bytes]:
@@ -184,6 +195,8 @@ class CameraManager:
             ret, frame = self._cap.read()
             if not ret or frame is None:
                 self._last_error = "Frame grab failed"
+                self._latest_bgr = None
+                self._buffer.clear()
                 # Mark a dead network/device stream closed so the capture loop
                 # can reopen it with backoff instead of spinning on a stale
                 # VideoCapture handle.
@@ -202,6 +215,7 @@ class CameraManager:
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
             if ok:
                 self._frame_count += 1
+                self._frame_times.append(self._last_frame_at)
                 return buf.tobytes()
 
         return None
@@ -223,24 +237,3 @@ class CameraManager:
                 time.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 30.0)
                 self.open()
-
-    @staticmethod
-    def _synthetic_jpeg() -> bytes:
-        """1×1 green pixel JPEG for simulation / offline fallback."""
-        # Minimal valid JPEG (green pixel)
-        return bytes([
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-            0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
-            0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
-            0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
-            0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
-            0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
-            0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
-            0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
-            0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00,
-            0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0xB5, 0x10, 0x00, 0x02, 0x01, 0x03,
-            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0x7B, 0x40,
-            0x1F, 0xFF, 0xD9,
-        ])

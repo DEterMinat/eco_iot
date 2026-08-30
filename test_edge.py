@@ -114,21 +114,16 @@ def test_ai_engine():
     print(f"  [OK] predict: {result['waste_type']} ({result['confidence']*100:.0f}%) in {result['latency_ms']:.1f}ms")
 
 
-# ── 5. Camera Tests (simulation) ──────────────────────────────────────────────
+# ── 5. Camera Tests (no fake frames) ──────────────────────────────────────────
 
-def test_camera_simulation():
+def test_camera_unavailable_without_device():
     from camera import CameraManager
 
-    cam = CameraManager(index=99, buffer_size=2)  # Index 99 = will fail, use simulation
-    # Should still provide synthetic frames
-    b64 = cam.grab_frame_base64()
-    # In simulation mode with no open camera, may return None or synthetic
-    jpeg = cam.grab_frame_jpeg()
-    # Synthetic JPEG should be valid
-    synthetic = cam._synthetic_jpeg()
-    assert synthetic[:2] == b"\xff\xd8"  # JPEG SOI marker
-    assert synthetic[-2:] == b"\xff\xd9"  # JPEG EOI marker
-    print(f"  [OK] Camera simulation (synthetic JPEG: {len(synthetic)} bytes)")
+    cam = CameraManager(index=99, buffer_size=2)  # Index 99 should not exist.
+    assert cam.grab_frame_base64() is None
+    assert cam.grab_frame_jpeg() is None
+    assert not cam.is_open
+    print("  [OK] Camera failure is explicit (no synthetic frame)")
 
 
 # ── Runner ─────────────────────────────────────────────────────────────────────
@@ -143,7 +138,7 @@ def main():
         ("Key Manager Lifecycle", test_key_lifecycle),
         ("Memory Guard", test_memory_guard),
         ("AI Engine", test_ai_engine),
-        ("Camera Simulation", test_camera_simulation),
+        ("Camera unavailable", test_camera_unavailable_without_device),
     ]
 
     passed = 0
